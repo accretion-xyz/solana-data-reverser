@@ -1,0 +1,5 @@
+
+# Ignore all files in the .claude directory
+.claude/*
+
+
