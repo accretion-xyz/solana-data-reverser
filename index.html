@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Accretion Solana Data Reverser</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .hex-byte {
+            transition: all 0.2s ease;
+            font-family: 'Courier New', monospace;
+        }
+        .hex-byte:hover {
+            transform: scale(1.1);
+        }
+        .max-confidence-glow {
+            animation: subtleGlow 3s ease-in-out infinite alternate;
+            position: relative;
+            z-index: 10;
+        }
+        @keyframes subtleGlow {
+            from { box-shadow: 0 0 2px #3b82f6, 0 0 4px #3b82f6; }
+            to { box-shadow: 0 0 4px #1d4ed8, 0 0 8px #1d4ed8; }
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <div class="container mx-auto px-4 py-6 max-w-7xl">
+        <header class="mb-8">
+            <div class="flex items-center justify-between mb-6">
+                <div class="flex items-center gap-4">
+                    <img src="logo.png" alt="Accretion Logo" class="h-12 w-12 object-contain">
+                    <h1 class="text-3xl font-bold text-gray-800">Accretion Solana Data Reverser</h1>
+                </div>
+                <button id="settingsBtn" class="px-3 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors text-sm" title="Settings">
+                    ⚙️ Settings
+                </button>
+            </div>
+            <div class="flex gap-4 mb-6">
+                <textarea 
+                    id="hexInput" 
+                    placeholder="Enter hex data (with or without spaces) or Solana account pubkey&#10;Hex example: 38 6d 97 6a bf f6 01 a2 30 93 3c 25 74 e6 26 96&#10;Account example: DJtaJXMUtFmypygj4k3NbfVxxjsbhnYBwAuAjv9GEQ6P"
+                    class="flex-1 p-3 border border-gray-300 rounded-lg resize-y h-16 font-mono text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                ></textarea>
+                <button 
+                    id="processBtn"
+                    class="px-4 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors font-medium"
+                >
+                    Process Data
+                </button>
+            </div>
+        </header>
+        
+        <main class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div class="lg:col-span-2">
+                <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+                    <h2 class="text-xl font-semibold text-gray-800 mb-4">Hexdump</h2>
+                    <div id="hexdump" class="bg-gray-50 border border-gray-200 rounded-lg p-4 font-mono text-sm overflow-auto max-h-[600px]"></div>
+                </div>
+            </div>
+            
+            <div class="space-y-6">
+                <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                    <h3 class="text-lg font-semibold text-gray-800 mb-3">Accepted Decodings</h3>
+                    <div id="acceptedList" class="space-y-2 max-h-48 overflow-y-auto"></div>
+                </div>
+                
+                <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                    <h3 class="text-lg font-semibold text-gray-800 mb-3">Selection Decode</h3>
+                    <div class="relative">
+                        <div id="selectionDecodeList" class="space-y-1 max-h-40 overflow-y-auto scroll-smooth"></div>
+                        <div id="scrollIndicator" class="hidden absolute bottom-0 right-0 bg-gradient-to-t from-white to-transparent h-6 w-full pointer-events-none">
+                            <div class="absolute bottom-1 right-2 text-xs text-gray-400">⬇ scroll</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                    <h3 class="text-lg font-semibold text-gray-800 mb-3">Smart Suggestions</h3>
+                    <div id="suggestionsList" class="space-y-1 max-h-60 overflow-y-auto">
+                        <p class="text-gray-500 text-sm">Enter hex data to see smart suggestions</p>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    
+    <!-- First Time Setup Modal -->
+    <div id="setupModal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
+        <div class="bg-white rounded-lg p-6 max-w-lg w-full mx-4">
+            <div class="text-center mb-6">
+                <h2 class="text-2xl font-semibold text-gray-800 mb-2">Welcome to Accretion Solana Data Reverser!</h2>
+                <p class="text-gray-600">To get started, you'll need to configure a Solana RPC endpoint.</p>
+            </div>
+            
+            <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
+                <h3 class="font-medium text-blue-800 mb-2">Why do I need this?</h3>
+                <p class="text-sm text-blue-700">
+                    This tool needs to connect to the Solana blockchain to fetch account data and verify addresses. 
+                    You can get free RPC endpoints from providers like Helius, QuickNode, or use Solana's public endpoint.
+                </p>
+            </div>
+            
+            <div class="space-y-4">
+                <div>
+                    <label for="setupRpcEndpoint" class="block text-sm font-medium text-gray-700 mb-2">
+                        Solana RPC Endpoint *
+                    </label>
+                    <input 
+                        type="url" 
+                        id="setupRpcEndpoint" 
+                        placeholder="https://api.mainnet-beta.solana.com" 
+                        class="w-full p-3 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    >
+                </div>
+                
+                <div>
+                    <label for="setupRpcTimeout" class="block text-sm font-medium text-gray-700 mb-2">
+                        RPC Timeout (ms)
+                    </label>
+                    <input 
+                        type="number" 
+                        id="setupRpcTimeout" 
+                        value="5000" 
+                        min="1000"
+                        max="30000"
+                        step="500"
+                        class="w-full p-3 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    >
+                </div>
+                
+                <div>
+                    <label class="flex items-center gap-3">
+                        <input type="checkbox" id="setupEnableBatching" class="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500">
+                        <div>
+                            <span class="text-sm font-medium text-gray-700">Enable Batched Requests</span>
+                            <p class="text-xs text-gray-600">
+                                Uncheck this if using a free RPC that doesn't support batch requests.
+                            </p>
+                        </div>
+                    </label>
+                </div>
+                
+                <button id="completeSetupBtn" class="w-full px-4 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors font-medium">
+                    Complete Setup & Start Analyzing
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Settings Modal -->
+    <div id="settingsModal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
+        <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-semibold text-gray-800">Settings</h2>
+                <button id="closeSettingsBtn" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+            </div>
+            
+            <div class="space-y-4">
+                <div>
+                    <label for="rpcEndpoint" class="block text-sm font-medium text-gray-700 mb-2">
+                        Solana RPC Endpoint
+                    </label>
+                    <input 
+                        type="url" 
+                        id="rpcEndpoint" 
+                        placeholder="https://api.mainnet-beta.solana.com" 
+                        class="w-full p-3 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    >
+                    <p class="text-xs text-gray-600 mt-1">
+                        Enter your own RPC endpoint. You can get free endpoints from Helius, QuickNode, or Alchemy.
+                    </p>
+                </div>
+                
+                <div>
+                    <label for="rpcTimeout" class="block text-sm font-medium text-gray-700 mb-2">
+                        RPC Call Timeout (ms)
+                    </label>
+                    <input 
+                        type="number" 
+                        id="rpcTimeout" 
+                        placeholder="5000" 
+                        min="1000"
+                        max="30000"
+                        step="500"
+                        class="w-full p-3 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    >
+                    <p class="text-xs text-gray-600 mt-1">
+                        Timeout for RPC requests in milliseconds (1000-30000ms).
+                    </p>
+                </div>
+                
+                <div>
+                    <label class="flex items-center gap-3">
+                        <input type="checkbox" id="enableBatching" class="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500">
+                        <div>
+                            <span class="text-sm font-medium text-gray-700">Enable Batched Account Lookups</span>
+                            <p class="text-xs text-gray-600">
+                                Batch multiple account requests into single RPC calls. Disable for free RPC endpoints that don't support batching.
+                            </p>
+                        </div>
+                    </label>
+                </div>
+                
+                <div class="flex gap-3 pt-4">
+                    <button id="saveSettingsBtn" class="flex-1 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors">
+                        Save
+                    </button>
+                    <button id="cancelSettingsBtn" class="flex-1 px-4 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 transition-colors">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="script.js"></script>
+</body>
+</html>
