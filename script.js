@@ -1444,7 +1444,15 @@ class ReverseDataTool {
     
     analyzeAccountInfo(accountInfo, pubkey) {
         const owner = accountInfo.owner;
-        const dataSize = accountInfo.data ? accountInfo.data.length : 0;
+        let dataBytes = [];
+        if (accountInfo.data) {
+            if (Array.isArray(accountInfo.data)) {
+                dataBytes = this.decodeBase64ToBytes(accountInfo.data[0]);
+            } else if (typeof accountInfo.data === 'string') {
+                dataBytes = this.decodeBase64ToBytes(accountInfo.data);
+            }
+        }
+        const dataSize = dataBytes.length;
         const programName = this.knownPrograms[owner] || 'Unknown Program';
         
         let accountType = 'Unknown Account';
@@ -1460,10 +1468,10 @@ class ReverseDataTool {
         else if (owner === 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') {
             if (dataSize === this.TOKEN_ACCOUNT_SIZE) {
                 accountType = 'SPL Token Account';
-                details = this.parseTokenAccount(accountInfo.data);
+                details = this.parseTokenAccount(dataBytes);
             } else if (dataSize === this.TOKEN_MINT_SIZE) {
                 accountType = 'SPL Token Mint';
-                details = this.parseTokenMint(accountInfo.data);
+                details = this.parseTokenMint(dataBytes);
             } else {
                 accountType = 'SPL Token Program Account';
             }
@@ -1473,10 +1481,10 @@ class ReverseDataTool {
         else if (owner === 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb') {
             if (dataSize >= this.TOKEN_ACCOUNT_SIZE) {
                 accountType = 'Token-2022 Account';
-                details = this.parseTokenAccount(accountInfo.data);
+                details = this.parseTokenAccount(dataBytes);
             } else if (dataSize >= this.TOKEN_MINT_SIZE) {
                 accountType = 'Token-2022 Mint';
-                details = this.parseTokenMint(accountInfo.data);
+                details = this.parseTokenMint(dataBytes);
             } else {
                 accountType = 'Token-2022 Program Account';
             }
@@ -1556,6 +1564,15 @@ class ReverseDataTool {
             bytes.push(parseInt(hex.substr(i, 2), 16));
         }
         return this.base58Encode(bytes);
+    }
+
+    decodeBase64ToBytes(base64) {
+        const binaryString = atob(base64);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        return bytes;
     }
     
     base58Encode(bytes) {
