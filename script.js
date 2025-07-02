@@ -39,6 +39,14 @@ class ReverseDataTool {
         this.TOKEN_ACCOUNT_SIZE = 165;
         this.TOKEN_MINT_SIZE = 82;
         
+        // Account caching
+        this.accountCache = new Map();
+        this.CACHE_DURATION = 5 * 60 * 1000; // 5 minutes in milliseconds
+        
+        // Pattern database
+        this.patterns = null;
+        this.loadPatternDatabase();
+        
         this.initializeEventListeners();
         this.initializeToastContainer();
         this.initializeSettingsModal();
@@ -119,6 +127,23 @@ class ReverseDataTool {
         const existingAccountBox = document.getElementById('account-info-box');
         if (existingAccountBox) {
             existingAccountBox.remove();
+        }
+    }
+    
+    clearAccountCache() {
+        this.accountCache.clear();
+        this.showToast('Account cache cleared', 'success', 2000);
+        console.log('Account cache cleared');
+    }
+    
+    async loadPatternDatabase() {
+        try {
+            const response = await fetch('patterns.json');
+            this.patterns = await response.json();
+            console.log('Pattern database loaded:', Object.keys(this.patterns).length, 'categories');
+        } catch (error) {
+            console.warn('Failed to load pattern database:', error.message);
+            this.patterns = {};
         }
     }
     
@@ -842,6 +867,7 @@ class ReverseDataTool {
         this.detectDiscriminator();
         this.detectSpecialNumbers();
         this.detectMeaningfulStrings();
+        this.detectPatternMatches();
         this.renderSuggestions();
         
         // Show loading indicator for Solana detection
@@ -975,6 +1001,62 @@ class ReverseDataTool {
     openCreateAccountInstruction(pubkey) {
         // Open Solscan to search for createAccount instruction for this account
         window.open(`https://solscan.io/account/${pubkey}#transactions`, '_blank');
+    }
+    
+    detectPatternMatches() {
+        if (!this.patterns) {
+            return; // Pattern database not loaded yet
+        }
+        
+        // Convert raw data to hex string for pattern matching
+        const hexString = this.rawData.map(byte => byte.toString(16).padStart(2, '0')).join('');
+        
+        // Check all pattern categories
+        for (const [category, patterns] of Object.entries(this.patterns)) {
+            for (const [pattern, description] of Object.entries(patterns)) {
+                // Find all occurrences of this pattern
+                let index = 0;
+                while (index < hexString.length) {
+                    const foundIndex = hexString.indexOf(pattern.toLowerCase(), index);
+                    if (foundIndex === -1) break;
+                    
+                    // Convert hex character index to byte index
+                    const byteOffset = foundIndex / 2;
+                    const patternLength = pattern.length / 2;
+                    
+                    // Skip if this would go beyond our data
+                    if (byteOffset + patternLength > this.rawData.length) break;
+                    
+                    // Only suggest if bytes are not already decoded
+                    if (this.byteStates.slice(byteOffset, byteOffset + patternLength).every(state => state === 'undefined')) {
+                        // Determine confidence based on pattern category
+                        let confidence = 0.8; // Default confidence
+                        let categoryName = category;
+                        
+                        if (category === 'discriminators') {
+                            confidence = 0.95;
+                            categoryName = 'Known Discriminator';
+                        } else if (category === 'constants') {
+                            confidence = 0.85;
+                            categoryName = 'Known Constant';
+                        }
+                        
+                        this.suggestions.push({
+                            type: categoryName,
+                            range: [byteOffset, byteOffset + patternLength],
+                            value: description,
+                            confidence: confidence,
+                            pattern: pattern.toUpperCase()
+                        });
+                        
+                        console.log(`[PATTERN HIT] Found ${categoryName} at offset ${byteOffset}: ${pattern.toUpperCase()} -> "${description}"`);
+                    }
+                    
+                    // Continue searching after this match
+                    index = foundIndex + 2; // Move by 1 byte (2 hex chars)
+                }
+            }
+        }
     }
     
     detectSpecialNumbers() {
@@ -1341,10 +1423,58 @@ class ReverseDataTool {
             
             // Update suggestions immediately when found
             this.renderSuggestions();
+            
+            // Cache the successful response
+            this.accountCache.set(pubkey, {
+                accountInfo: accountInfo,
+                timestamp: Date.now()
+            });
+        } else {
+            // Cache negative result (account doesn't exist or has 0 lamports)
+            this.accountCache.set(pubkey, {
+                accountInfo: null,
+                timestamp: Date.now()
+            });
         }
     }
     
     async checkSolanaAccount(pubkey, offset, retryCount = 0) {
+        // Check cache first
+        const cacheKey = pubkey;
+        const cached = this.accountCache.get(cacheKey);
+        if (cached && Date.now() - cached.timestamp < this.CACHE_DURATION) {
+            const cacheAge = Math.round((Date.now() - cached.timestamp) / 1000);
+            console.log(`[CACHE HIT] Using cached account data for ${pubkey} (age: ${cacheAge}s)`);
+            
+            if (cached.accountInfo && cached.accountInfo.lamports > 0) {
+                const accountDetails = this.analyzeAccountInfo(cached.accountInfo, pubkey);
+                
+                // Calculate confidence based on zero byte count
+                const pubkeyBytes = this.rawData.slice(offset, offset + 32);
+                const zeroByteCount = pubkeyBytes.filter(byte => byte === 0).length;
+                let confidence = 0.95;
+                
+                if (zeroByteCount <= 20) {
+                    confidence = 1.0;
+                } else {
+                    confidence = Math.max(0.7, 0.95 - (zeroByteCount - 20) * 0.05);
+                }
+                
+                this.suggestions.push({
+                    type: 'Solana Pubkey',
+                    range: [offset, offset + 32],
+                    value: pubkey,
+                    confidence: confidence,
+                    lamports: cached.accountInfo.lamports,
+                    accountDetails: accountDetails,
+                    isMaxConfidence: confidence === 1.0
+                });
+                
+                this.renderSuggestions();
+            }
+            return;
+        }
+        
         const maxRetries = this.solanaRpcUrls.length;
         
         if (retryCount >= maxRetries) {
@@ -1429,6 +1559,20 @@ class ReverseDataTool {
                 
                 // Update suggestions immediately when found
                 this.renderSuggestions();
+                
+                // Cache the successful response
+                this.accountCache.set(pubkey, {
+                    accountInfo: accountInfo,
+                    timestamp: Date.now()
+                });
+                console.log(`[CACHE STORE] Cached account data for ${pubkey} (${accountInfo.lamports} lamports)`);
+            } else {
+                // Cache negative result (account doesn't exist or has 0 lamports)
+                this.accountCache.set(pubkey, {
+                    accountInfo: null,
+                    timestamp: Date.now()
+                });
+                console.log(`[CACHE STORE] Cached negative result for ${pubkey} (account not found or 0 lamports)`);
             }
         } catch (error) {
             // Try next RPC endpoint on any fetch errors (including CORS)
@@ -1826,6 +1970,7 @@ class ReverseDataTool {
         const closeSettingsBtn = document.getElementById('closeSettingsBtn');
         const cancelSettingsBtn = document.getElementById('cancelSettingsBtn');
         const saveSettingsBtn = document.getElementById('saveSettingsBtn');
+        const clearCacheBtn = document.getElementById('clearCacheBtn');
         const rpcEndpointInput = document.getElementById('rpcEndpoint');
         
         // Load current settings into inputs
@@ -1885,6 +2030,11 @@ class ReverseDataTool {
             
             this.saveRpcSettings(endpoint, timeout, enableBatching);
             hideModal();
+        });
+        
+        // Clear cache button
+        clearCacheBtn.addEventListener('click', () => {
+            this.clearAccountCache();
         });
         
         // Enter key to save
