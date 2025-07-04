@@ -22,6 +22,15 @@
             from { box-shadow: 0 0 2px #3b82f6, 0 0 4px #3b82f6; }
             to { box-shadow: 0 0 4px #1d4ed8, 0 0 8px #1d4ed8; }
         }
+        .search-highlight {
+            background-color: #fbbf24 !important;
+            color: #92400e !important;
+        }
+        .search-current {
+            background-color: #f59e0b !important;
+            color: #78350f !important;
+            ring: 2px solid #d97706;
+        }
     </style>
 </head>
 <body class="bg-gray-50 min-h-screen">
@@ -55,6 +64,23 @@
             <div class="lg:col-span-2">
                 <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
                     <h2 class="text-xl font-semibold text-gray-800 mb-4">Hexdump</h2>
+                    
+                    <!-- Smart Search Bar -->
+                    <div class="flex items-center gap-3 mb-4">
+                        <div class="flex-1 relative">
+                            <input 
+                                id="smartSearch" 
+                                type="text"
+                                placeholder="Search: 1234, 0xABCD, pubkey, @offset..."
+                                class="w-full p-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            />
+                        </div>
+                        <span id="searchResults" class="text-sm text-gray-600 whitespace-nowrap"></span>
+                        <button id="clearSearch" class="px-2 py-1 text-gray-500 hover:text-red-500 text-lg font-bold transition-colors" title="Clear search">
+                            ×
+                        </button>
+                    </div>
+                    
                     <div id="hexdump" class="bg-gray-50 border border-gray-200 rounded-lg p-4 font-mono text-sm overflow-auto max-h-[600px]"></div>
                 </div>
             </div>

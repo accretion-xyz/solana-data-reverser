@@ -42,6 +42,14 @@ class ReverseDataTool {
         // Account caching
         this.accountCache = new Map();
         this.CACHE_DURATION = 5 * 60 * 1000; // 5 minutes in milliseconds
+        
+        // Smart search
+        this.searchMatches = [];
+        this.currentMatchIndex = -1;
+        this.searchDebounceTimer = null;
+        
+        // Range selection
+        this.lastClickedByte = -1;
 
         // Pattern database
         this.patterns = {
@@ -9899,6 +9907,28 @@ initializeEventListeners() {
             this.processHexInput();
         }
     });
+    
+    // Smart search event listeners
+    const smartSearch = document.getElementById('smartSearch');
+    const clearSearch = document.getElementById('clearSearch');
+    
+    smartSearch.addEventListener('input', (e) => {
+        this.handleSearchInput(e.target.value);
+    });
+    
+    smartSearch.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            this.navigateToNextMatch();
+        } else if (e.key === 'Escape') {
+            this.clearSearch();
+            smartSearch.blur();
+        }
+    });
+    
+    clearSearch.addEventListener('click', () => {
+        this.clearSearch();
+    });
 }
 
 initializeToastContainer() {
@@ -9965,12 +9995,328 @@ clearAllLists() {
     }
 }
 
+clearAllLists() {
+    // Clear all data structures
+    this.suggestions = [];
+    this.acceptedDecodings = [];
+    this.stagedBytes = [];
+    this.isAccountData = false;
+    this.currentAccountInfo = null;
+    
+    // Clear search state
+    this.searchMatches = [];
+    this.currentMatchIndex = -1;
+    this.clearSearchHighlights();
+    document.getElementById('smartSearch').value = '';
+    
+    // Clear UI elements
+    document.getElementById('acceptedList').innerHTML = '<p class="text-gray-500 text-sm">No accepted decodings yet</p>';
+    document.getElementById('suggestionsList').innerHTML = '<p class="text-gray-500 text-sm">Enter hex data to see smart suggestions</p>';
+    document.getElementById('selectionDecodeList').innerHTML = '<p class="text-gray-500 text-sm">Select bytes to see interpretations</p>';
+    
+    // Remove account info box if it exists
+    const existingAccountBox = document.getElementById('account-info-box');
+    if (existingAccountBox) {
+        existingAccountBox.remove();
+    }
+}
+
 clearAccountCache() {
     this.accountCache.clear();
     this.showToast('Account cache cleared', 'success', 2000);
     console.log('Account cache cleared');
 }
 
+handleSearchInput(value) {
+    // Debounce search input
+    clearTimeout(this.searchDebounceTimer);
+    this.searchDebounceTimer = setTimeout(() => {
+        this.performSearch(value);
+    }, 300);
+}
+
+parseSearchInput(input) {
+    const trimmed = input.trim();
+    if (!trimmed) return null;
+    
+    // Offset lookup (@32)
+    if (trimmed.startsWith('@')) {
+        const offset = parseInt(trimmed.substring(1));
+        if (!isNaN(offset)) {
+            return { type: 'offset', value: offset };
+        }
+    }
+    
+    // Decimal number (1234) - check this BEFORE hex to avoid conflicts
+    if (/^\d+$/.test(trimmed)) {
+        const num = parseInt(trimmed);
+        return { type: 'decimal', value: num };
+    }
+    
+    // Hex sequence (0x1234 or abcd) - now requires 0x prefix OR non-decimal hex chars
+    if (trimmed.toLowerCase().startsWith('0x')) {
+        const hex = trimmed.substring(2).toLowerCase();
+        if (/^[a-f0-9]+$/i.test(hex) && hex.length % 2 === 0) {
+            return { type: 'hex', value: hex };
+        }
+    } else if (/^[a-f0-9]+$/i.test(trimmed) && /[a-f]/i.test(trimmed) && trimmed.length % 2 === 0) {
+        // Hex without 0x prefix, but must contain at least one a-f character
+        return { type: 'hex', value: trimmed.toLowerCase() };
+    }
+    
+    // Solana pubkey (base58)
+    if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed)) {
+        try {
+            // Convert base58 to hex
+            const decoded = this.base58Decode(trimmed);
+            if (decoded.length === 32) {
+                const hex = Array.from(decoded).map(b => b.toString(16).padStart(2, '0')).join('');
+                return { type: 'pubkey', value: hex, original: trimmed };
+            }
+        } catch (e) {
+            // Invalid base58
+        }
+    }
+    
+    // String search
+    return { type: 'string', value: trimmed };
+}
+
+performSearch(input) {
+    this.clearSearchHighlights();
+    this.searchMatches = [];
+    this.currentMatchIndex = -1;
+    
+    const parsed = this.parseSearchInput(input);
+    if (!parsed || this.rawData.length === 0) {
+        this.updateSearchResults();
+        return;
+    }
+    
+    if (parsed.type === 'offset') {
+        this.handleOffsetLookup(parsed.value);
+    } else if (parsed.type === 'hex') {
+        this.searchHexPattern(parsed.value);
+    } else if (parsed.type === 'decimal') {
+        this.searchDecimalAsIntegers(parsed.value);
+    } else if (parsed.type === 'pubkey') {
+        this.searchHexPattern(parsed.value);
+    } else if (parsed.type === 'string') {
+        this.searchStringPattern(parsed.value);
+    }
+    
+    this.updateSearchResults();
+    if (this.searchMatches.length > 0) {
+        this.currentMatchIndex = 0;
+        this.highlightCurrentMatch();
+    }
+}
+
+handleOffsetLookup(offset) {
+    if (offset >= 0 && offset < this.rawData.length) {
+        this.searchMatches = [{ start: offset, end: offset + 1 }];
+    }
+}
+
+searchHexPattern(hexPattern) {
+    const pattern = hexPattern.toLowerCase();
+    const patternBytes = [];
+    
+    for (let i = 0; i < pattern.length; i += 2) {
+        patternBytes.push(parseInt(pattern.substring(i, i + 2), 16));
+    }
+    
+    for (let i = 0; i <= this.rawData.length - patternBytes.length; i++) {
+        let match = true;
+        for (let j = 0; j < patternBytes.length; j++) {
+            if (this.rawData[i + j] !== patternBytes[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            this.searchMatches.push({ start: i, end: i + patternBytes.length });
+        }
+    }
+}
+
+searchDecimalAsIntegers(num) {
+    // Build search list - include u8 for numbers < 256
+    const searches = [];
+    
+    if (num < 256) {
+        searches.push({ bytes: [num], name: 'u8' });
+    }
+    
+    searches.push(
+        { bytes: this.numberToLEBytes(num, 2), name: 'u16' },
+        { bytes: this.numberToLEBytes(num, 4), name: 'u32' },
+        { bytes: this.numberToLEBytes(num, 8), name: 'u64' }
+    );
+    
+    console.log(`[SEARCH] Looking for decimal ${num} as:`);
+    
+    for (const search of searches) {
+        if (search.bytes) {
+            const hexStr = search.bytes.map(b => b.toString(16).padStart(2, '0')).join(' ');
+            console.log(`  ${search.name}: [${hexStr}]`);
+            
+            for (let i = 0; i <= this.rawData.length - search.bytes.length; i++) {
+                let match = true;
+                for (let j = 0; j < search.bytes.length; j++) {
+                    if (this.rawData[i + j] !== search.bytes[j]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) {
+                    console.log(`  Found ${search.name} match at offset ${i}`);
+                    this.searchMatches.push({ 
+                        start: i, 
+                        end: i + search.bytes.length,
+                        type: search.name
+                    });
+                }
+            }
+        } else {
+            console.log(`  ${search.name}: too large for type`);
+        }
+    }
+}
+
+searchStringPattern(str) {
+    const utf8Bytes = new TextEncoder().encode(str);
+    
+    for (let i = 0; i <= this.rawData.length - utf8Bytes.length; i++) {
+        let match = true;
+        for (let j = 0; j < utf8Bytes.length; j++) {
+            if (this.rawData[i + j] !== utf8Bytes[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            this.searchMatches.push({ start: i, end: i + utf8Bytes.length });
+        }
+    }
+}
+
+numberToLEBytes(num, byteCount) {
+    if (num < 0) return null;
+    
+    // Use BigInt for larger numbers to avoid precision issues
+    const bigNum = BigInt(num);
+    const maxValue = BigInt(1) << BigInt(byteCount * 8);
+    
+    if (bigNum >= maxValue) return null;
+    
+    const bytes = [];
+    for (let i = 0; i < byteCount; i++) {
+        bytes.push(Number((bigNum >> BigInt(i * 8)) & BigInt(0xFF)));
+    }
+    return bytes;
+}
+
+base58Decode(str) {
+    const alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+    const base = alphabet.length;
+    
+    let num = 0n;
+    for (let i = 0; i < str.length; i++) {
+        const char = str[i];
+        const index = alphabet.indexOf(char);
+        if (index === -1) throw new Error('Invalid base58 character');
+        num = num * BigInt(base) + BigInt(index);
+    }
+    
+    const bytes = [];
+    while (num > 0n) {
+        bytes.unshift(Number(num % 256n));
+        num = num / 256n;
+    }
+    
+    // Handle leading zeros
+    for (let i = 0; i < str.length && str[i] === '1'; i++) {
+        bytes.unshift(0);
+    }
+    
+    return new Uint8Array(bytes);
+}
+
+bytesToAsciiString(bytes) {
+    let result = '';
+    for (const byte of bytes) {
+        if (byte >= 32 && byte <= 126) {
+            // Printable ASCII character
+            result += String.fromCharCode(byte);
+        } else if (byte === 0) {
+            // Null terminator - show as \0
+            result += '\\0';
+        } else {
+            // Non-printable character - show as hex
+            result += `\\x${byte.toString(16).padStart(2, '0')}`;
+        }
+    }
+    return `"${result}"`;
+}
+
+clearSearch() {
+    document.getElementById('smartSearch').value = '';
+    this.clearSearchHighlights();
+    this.searchMatches = [];
+    this.currentMatchIndex = -1;
+    this.updateSearchResults();
+}
+
+clearSearchHighlights() {
+    document.querySelectorAll('.search-highlight, .search-current').forEach(el => {
+        el.classList.remove('search-highlight', 'search-current');
+    });
+}
+
+highlightCurrentMatch() {
+    this.clearSearchHighlights();
+    
+    for (let i = 0; i < this.searchMatches.length; i++) {
+        const match = this.searchMatches[i];
+        for (let j = match.start; j < match.end; j++) {
+            const byteElement = document.querySelector(`[data-index="${j}"]`);
+            if (byteElement) {
+                if (i === this.currentMatchIndex) {
+                    byteElement.classList.add('search-current');
+                } else {
+                    byteElement.classList.add('search-highlight');
+                }
+            }
+        }
+    }
+    
+    // Scroll to current match
+    if (this.searchMatches.length > 0 && this.currentMatchIndex >= 0) {
+        const match = this.searchMatches[this.currentMatchIndex];
+        const byteElement = document.querySelector(`[data-index="${match.start}"]`);
+        if (byteElement) {
+            byteElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    }
+}
+
+navigateToNextMatch() {
+    if (this.searchMatches.length === 0) return;
+    
+    this.currentMatchIndex = (this.currentMatchIndex + 1) % this.searchMatches.length;
+    this.highlightCurrentMatch();
+    this.updateSearchResults();
+}
+
+updateSearchResults() {
+    const resultsElement = document.getElementById('searchResults');
+    if (this.searchMatches.length === 0) {
+        resultsElement.textContent = '';
+    } else {
+        resultsElement.textContent = `${this.currentMatchIndex + 1} of ${this.searchMatches.length}`;
+    }
+}
 
 isSolanaAccountAddress(input) {
     // Check if input looks like a Solana account address
@@ -10237,11 +10583,11 @@ renderHexdump() {
 
             byteSpan.addEventListener('mouseenter', () => this.onByteHover(i));
             byteSpan.addEventListener('mouseleave', () => this.onByteUnhover(i));
-            byteSpan.addEventListener('click', () => {
+            byteSpan.addEventListener('click', (e) => {
                 if (this.isMaxConfidenceByte(i)) {
                     this.acceptMaxConfidenceSuggestion(i);
                 } else {
-                    this.toggleByteStaging(i);
+                    this.handleByteClick(i, e.shiftKey);
                 }
             });
 
@@ -10337,6 +10683,31 @@ unhighlightAllDecodings() {
     });
 }
 
+handleByteClick(index, shiftKey) {
+    if (shiftKey && this.lastClickedByte !== -1) {
+        // Shift-click range selection
+        const start = Math.min(this.lastClickedByte, index);
+        const end = Math.max(this.lastClickedByte, index);
+        
+        // Clear current selection
+        this.stagedBytes = [];
+        
+        // Select range, skipping already decoded bytes
+        for (let i = start; i <= end; i++) {
+            if (this.byteStates[i] !== 'decoded') {
+                this.stagedBytes.push(i);
+            }
+        }
+        
+        this.renderHexdump();
+        this.updateSelectionDecode();
+    } else {
+        // Normal single-byte toggle
+        this.toggleByteStaging(index);
+        this.lastClickedByte = index;
+    }
+}
+
 toggleByteStaging(index) {
     if (this.byteStates[index] === 'decoded') {
         return;
@@ -10382,6 +10753,18 @@ updateSelectionDecode() {
         scrollIndicator.classList.add('hidden');
         return;
     }
+
+    // Add offset information at the top
+    const startOffset = Math.min(...this.stagedBytes);
+    const endOffset = Math.max(...this.stagedBytes);
+    const offsetInfo = document.createElement('div');
+    offsetInfo.className = 'text-xs text-gray-600 mb-2 pb-2 border-b border-gray-200';
+    if (startOffset === endOffset) {
+        offsetInfo.textContent = `Offset: ${startOffset} (1 byte)`;
+    } else {
+        offsetInfo.textContent = `Offsets: ${startOffset}-${endOffset} (${this.stagedBytes.length} bytes)`;
+    }
+    container.appendChild(offsetInfo);
 
     const interpretations = this.generateInterpretations(this.stagedBytes);
     interpretations.forEach(interpretation => {
@@ -10557,6 +10940,46 @@ generateInterpretations(indices) {
         // Check if account exists asynchronously
         this.checkPubkeyExists(pubkeyBase58, pubkeyInterpretation);
     }
+
+    // ASCII String interpretation for any length
+    if (indices.length > 0) {
+        const asciiValue = this.bytesToAsciiString(bytes);
+        interpretations.push({
+            type: 'ASCII String',
+            value: asciiValue,
+            range: [indices[0], indices[indices.length - 1] + 1]
+        });
+    }
+
+    // Sort interpretations by byte length (longer first), then by type priority
+    interpretations.sort((a, b) => {
+        const aLength = a.range[1] - a.range[0];
+        const bLength = b.range[1] - b.range[0];
+        
+        if (aLength !== bLength) {
+            return bLength - aLength; // Longer first
+        }
+        
+        // Same length - use type priority order (unsigned, signed, other, floats last)
+        const typePriority = {
+            'Solana Pubkey': 1,
+            'u64': 2,
+            'u32': 3,
+            'u16 (BE)': 4,
+            'u16 (LE)': 5,
+            'u8': 6,
+            'i32': 7,
+            'Unix Timestamp': 8,
+            'ASCII String': 9,
+            'Bump': 10,
+            'Bool': 11,
+            'Option': 12,
+            'f32': 13,
+            'f64': 14
+        };
+        
+        return (typePriority[a.type] || 999) - (typePriority[b.type] || 999);
+    });
 
     return interpretations;
 }
@@ -10923,6 +11346,19 @@ detectSpecialNumbers() {
                     confidence: 0.8
                 });
             }
+            
+            // Numbers with many trailing zeros (like 20000000)
+            else if (u32LE > 0 && this.hasTrailingZeros(u32LE)) {
+                const zeroCount = this.countTrailingZeroDigits(u32LE);
+                if (zeroCount >= 3) {
+                    this.suggestions.push({
+                        type: 'u32 (round)',
+                        range: [i, i + 4],
+                        value: u32LE.toLocaleString(),
+                        confidence: 0.91
+                    });
+                }
+            }
 
             // Repeating digit patterns
             else if (repeatingPatterns.includes(u32LE)) {
@@ -10994,8 +11430,46 @@ detectSpecialNumbers() {
                     confidence: 0.8
                 });
             }
+            
+            // Numbers with many trailing zeros (like 20000000) for u64
+            else if (u64Value > 0 && this.hasTrailingZeros(u64Value)) {
+                const zeroCount = this.countTrailingZeroDigits(u64Value);
+                if (zeroCount >= 3) {
+                    this.suggestions.push({
+                        type: 'u64 (round)',
+                        range: [i, i + 8],
+                        value: u64LE.toLocaleString(),
+                        confidence: 0.95
+                    });
+                }
+            }
         }
     }
+}
+
+hasTrailingZeros(number) {
+    const str = number.toString();
+    if (!str.endsWith('0') || str.length <= 1) {
+        return false;
+    }
+    
+    // Only consider it "round" if it's a power of 10 multiplied by a small number
+    // This prevents false positives like large random numbers that happen to end in zeros
+    const nonZeroDigits = str.replace(/0+$/, '');
+    return nonZeroDigits.length <= 3; // Only 1-3 significant digits before the zeros
+}
+
+countTrailingZeroDigits(number) {
+    const str = number.toString();
+    let count = 0;
+    for (let i = str.length - 1; i >= 0; i--) {
+        if (str[i] === '0') {
+            count++;
+        } else {
+            break;
+        }
+    }
+    return count;
 }
 
 detectMeaningfulStrings() {
@@ -11986,8 +12460,29 @@ async checkPubkeyExists(pubkey, interpretation) {
         interpretation.value = `${pubkey} (empty account)`;
     } finally {
         interpretation.isChecking = false;
-        this.updateSelectionDecode();
+        this.updatePubkeyInterpretation(interpretation);
     }
+}
+
+updatePubkeyInterpretation(interpretation) {
+    // Find the specific interpretation item in the DOM and update only its content
+    const container = document.getElementById('selectionDecodeList');
+    const items = container.querySelectorAll('.flex.justify-between.items-center');
+    
+    items.forEach(item => {
+        const typeSpan = item.querySelector('.text-sm.font-medium');
+        if (typeSpan && typeSpan.textContent === 'Solana Pubkey') {
+            const valueSpan = item.querySelector('.text-xs.text-gray-600.font-mono.break-all');
+            if (valueSpan) {
+                valueSpan.textContent = interpretation.value;
+                
+                // Update click handler with new interpretation data
+                const newItem = item.cloneNode(true);
+                newItem.addEventListener('click', () => this.acceptSelectionDecode(interpretation));
+                item.parentNode.replaceChild(newItem, item);
+            }
+        }
+    });
 }
 
 handleRpcError(statusCode, context) {

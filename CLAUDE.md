@@ -1,0 +1,2 @@
+## Code Insights
+- When reading script.js, from lines 56 to line 9891 there is just a loooong list of discriminator lookups. you can use shell tools to read the file without those lines specifically so that it fits in your context
